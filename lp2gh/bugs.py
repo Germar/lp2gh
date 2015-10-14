@@ -1,5 +1,6 @@
 import re
 import urllib2
+from time import sleep
 
 import gflags
 import jsontemplate
@@ -141,6 +142,7 @@ def export(project, only_open=None):
 
 
 def import_(repo, bugs, milestones_map=None):
+  global e
   e = exporter.Exporter()
   # set up all the labels we know
   for status in BUG_STATUS:
@@ -191,13 +193,11 @@ def import_(repo, bugs, milestones_map=None):
       [labels.translate_label(tags_map[x.lower()]) for x in params['labels']]))
 
     e.emit('with params: %s' % params)
-    try:
-      rv = issues.append(**params)
-    except urllib2.HTTPError as err:
-      e.emit('exception: %s' % err.read())
-      raise
+    rv = failsafe_import(issues.append, **params)
 
     mapping[bug['id']] = rv['number']
+    e.emit('')
+    sleep(1)
 
   # second pass
   for bug in bugs:
@@ -212,12 +212,7 @@ def import_(repo, bugs, milestones_map=None):
     for msg in bug['comments']:
       # TODO(termie): username mapping
       by_line = '(by %s)' % msg['owner']
-      try:
-        comments.append(body='%s\n%s' % (by_line, msg['content']))
-      except urllib2.HTTPError as err:
-        e.emit('exception: %s' % err.read())
-        raise
-
+      failsafe_import(comments.append, body='%s\n%s' % (by_line, msg['content']))
     # update the issue
     params = {'body': bug['description']}
     if bug['status'] in BUG_CLOSED_STATUS:
@@ -228,11 +223,23 @@ def import_(repo, bugs, milestones_map=None):
     #               but does allow editing an existing bug
     if bug['milestone']:
       params['milestone'] = milestones_map[bug['milestone']]
-    try:
-      issue.update(params)
-    except urllib2.HTTPError as err:
-      e.emit('exception: %s' % err.read())
-      raise
+    failsafe_import(issue.update, params)
 
+  e.emit('')
+  sleep(1)
 
   return mapping
+
+def failsafe_import(func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except urllib2.HTTPError as err:
+        description = err.read()
+        if description.find('triggered an abuse detection mechanism') >= 0:
+            e.emit('triggered abuse detection. Sleep a minute')
+            sleep(60)
+            e.emit('Retry')
+            return failsafe_import(func, *args, **kwargs)
+        else:
+            e.emit('exception: %s' % err.read())
+            raise
